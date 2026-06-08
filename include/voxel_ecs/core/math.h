@@ -44,6 +44,14 @@ struct Vec3f {
     float& operator[](int i) { return (&x)[i]; }
     const float& operator[](int i) const { return (&x)[i]; }
     
+    float length_sq() const { return x*x + y*y + z*z; }
+    float length() const { return std::sqrt(length_sq()); }
+    
+    Vec3f normalized() const {
+        float len = length();
+        return len > 1e-8f ? Vec3f(x/len, y/len, z/len) : Vec3f(0, 0, 0);
+    }
+    
     constexpr bool operator==(const Vec3f& o) const { 
         return std::abs(x-o.x) < 1e-6f && std::abs(y-o.y) < 1e-6f && std::abs(z-o.z) < 1e-6f; 
     }
@@ -64,6 +72,26 @@ struct Vec2f {
     
     constexpr Vec2f() : x(0), y(0) {}
     constexpr Vec2f(float x, float y) : x(x), y(y) {}
+    
+    constexpr Vec2f operator+(const Vec2f& o) const { return {x+o.x, y+o.y}; }
+    constexpr Vec2f operator-(const Vec2f& o) const { return {x-o.x, y-o.y}; }
+    constexpr Vec2f operator*(float s) const { return {x*s, y*s}; }
+    constexpr Vec2f operator/(float s) const { return {x/s, y/s}; }
+    
+    Vec2f& operator+=(const Vec2f& o) { x+=o.x; y+=o.y; return *this; }
+    Vec2f& operator*=(float s) { x*=s; y*=s; return *this; }
+    
+    float length_sq() const { return x*x + y*y; }
+    float length() const { return std::sqrt(length_sq()); }
+    
+    Vec2f normalized() const {
+        float len = length();
+        return len > 1e-8f ? Vec2f(x/len, y/len) : Vec2f(0, 0);
+    }
+    
+    constexpr bool operator==(const Vec2f& o) const {
+        return std::abs(x-o.x) < 1e-5f && std::abs(y-o.y) < 1e-5f;
+    }
 };
 
 struct Color {
@@ -87,6 +115,16 @@ struct Color {
     Color operator*(const Color& o) const { return {r*o.r, g*o.g, b*o.b}; }
     Color& operator+=(const Color& o) { r+=o.r; g+=o.g; b+=o.b; return *this; }
     Color& operator*=(float s) { r*=s; g*=s; b*=s; return *this; }
+    
+    bool operator==(const Color& o) const {
+        return std::abs(r - o.r) < 1e-5f && 
+               std::abs(g - o.g) < 1e-5f && 
+               std::abs(b - o.b) < 1e-5f;
+    }
+    
+    bool operator!=(const Color& o) const {
+        return !(*this == o);
+    }
 };
 
 struct AABB {
@@ -121,12 +159,24 @@ inline float dot(const Vec3f& a, const Vec3f& b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
 
+inline float dot(const Vec2f& a, const Vec2f& b) {
+    return a.x*b.x + a.y*b.y;
+}
+
 inline Vec3f cross(const Vec3f& a, const Vec3f& b) {
     return {
         a.y*b.z - a.z*b.y,
         a.z*b.x - a.x*b.z,
         a.x*b.y - a.y*b.x
     };
+}
+
+inline Vec3f reflect(const Vec3f& v, const Vec3f& n) {
+    return v - n * (2.0f * dot(v, n));
+}
+
+inline Vec3f operator*(float s, const Vec3f& v) {
+    return {s * v.x, s * v.y, s * v.z};
 }
 
 inline float length_sq(const Vec3f& v) {

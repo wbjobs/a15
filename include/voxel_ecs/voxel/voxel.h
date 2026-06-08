@@ -30,12 +30,17 @@ struct VoxelData {
     float metallic{0.0f};
     float emission{0.0f};
     uint8_t flags{0};
+    uint8_t material_id{0};
     
     static constexpr uint8_t FLAG_SOLID = 1 << 0;
     static constexpr uint8_t FLAG_TRANSPARENT = 1 << 1;
+    static constexpr uint8_t FLAG_WATER = 1 << 2;
+    static constexpr uint8_t FLAG_VEGETATION = 1 << 3;
     
     bool is_solid() const { return (flags & FLAG_SOLID) != 0; }
     bool is_transparent() const { return (flags & FLAG_TRANSPARENT) != 0; }
+    bool is_water() const { return (flags & FLAG_WATER) != 0; }
+    bool is_vegetation() const { return (flags & FLAG_VEGETATION) != 0; }
 };
 
 struct alignas(8) SVDAGNode {
@@ -52,6 +57,8 @@ struct alignas(8) SVDAGNode {
 struct SVDAGData {
     Color color;
     float opacity{1.0f};
+    uint8_t flags{VoxelData::FLAG_SOLID};
+    uint8_t material_id{0};
 };
 
 class SVDAG {
@@ -143,8 +150,8 @@ private:
         if (depth == 0) {
             SVDAGNode& node = nodes_[node_idx];
             node.is_leaf = true;
-            node.data_index = allocate_data(SVDAGData{voxel.albedo, 1.0f});
-            node.child_mask = voxel.is_solid() ? 0xFF : 0;
+            node.data_index = allocate_data(SVDAGData{voxel.albedo, 1.0f, voxel.flags, voxel.material_id});
+            node.child_mask = 0xFF;
             return;
         }
         
@@ -179,7 +186,8 @@ private:
             if (node.child_mask) {
                 VoxelData v;
                 v.albedo = data_[node.data_index].color;
-                v.flags = VoxelData::FLAG_SOLID;
+                v.flags = data_[node.data_index].flags;
+                v.material_id = data_[node.data_index].material_id;
                 return v;
             }
             return std::nullopt;
@@ -241,6 +249,8 @@ private:
                     h ^= std::bit_cast<uint32_t>(d.color.r) * 0x9e3779b9ULL;
                     h ^= std::bit_cast<uint32_t>(d.color.g) * 0x85ebca6bULL;
                     h ^= std::bit_cast<uint32_t>(d.color.b) * 0xc2b2ae35ULL;
+                    h ^= static_cast<uint64_t>(d.flags) * 0x27d4eb2fULL;
+                    h ^= static_cast<uint64_t>(d.material_id) * 0x165667b1ULL;
                 } else {
                     for (uint8_t i = 0; i < 8; ++i) {
                         if (node.has_child(i)) {

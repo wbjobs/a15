@@ -1,0 +1,15 @@
+add_executable(voxel_demo main.cpp)
+target_link_libraries(voxel_demo PRIVATE voxel_ecs)
+
+find_package(Threads REQUIRED)
+if(THREADS_HAVE_PTHREAD_ARG)
+    target_compile_options(voxel_demo PUBLIC "-pthread")
+endif()
+if(CMAKE_THREAD_LIBS_INIT)
+    target_link_libraries(voxel_demo PRIVATE "${CMAKE_THREAD_LIBS_INIT}")
+endif()
+
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(voxel_demo PRIVATE OpenMP::OpenMP_CXX)
+endif()

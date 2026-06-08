@@ -266,19 +266,33 @@ public:
           required_mask_(ComponentList<Components...>::mask()) {}
     
     void each() {
+        std::vector<EntityId> matching;
+        matching.reserve(em_.entity_masks().size());
+        
         for (auto& [entity, mask] : em_.entity_masks()) {
             if ((mask & required_mask_) == required_mask_) {
-                func_(entity, em_.get_component<Components>(entity)...);
+                matching.push_back(entity);
             }
+        }
+        
+        for (EntityId e : matching) {
+            func_(e, em_.get_component<Components>(e)...);
         }
     }
     
     template <typename Predicate>
     void each_if(Predicate pred) {
+        std::vector<EntityId> matching;
+        matching.reserve(em_.entity_masks().size());
+        
         for (auto& [entity, mask] : em_.entity_masks()) {
             if ((mask & required_mask_) == required_mask_ && pred(entity)) {
-                func_(entity, em_.get_component<Components>(entity)...);
+                matching.push_back(entity);
             }
+        }
+        
+        for (EntityId e : matching) {
+            func_(e, em_.get_component<Components>(e)...);
         }
     }
     

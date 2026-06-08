@@ -32,6 +32,7 @@ struct IrradianceProbe {
     bool dirty{true};
     bool active{true};
     float energy{1.0f};
+    float last_update_time{0.0f};
     
     static Color evaluate_sh(const std::array<Color, IRRADIANCE_SH_COEFFS>& coeffs, const Vec3f& dir) {
         float x = dir.x, y = dir.y, z = dir.z;
@@ -226,26 +227,41 @@ public:
     ProbeUpdateSystem(VoxelWorld* world, DDGIProbeGrid* grid)
         : world_(world), grid_(grid), tracer_(world) {}
     
-    void update_probe(int64_t x, int64_t y, int64_t z, uint32_t num_rays = 256) {
+    void update_probe(int64_t x, int64_t y, int64_t z, uint32_t num_rays = 128) {
         if (!grid_->in_bounds(x, y, z)) return;
         
         IrradianceProbe& probe = grid_->at(x, y, z);
         update_probe_irradiance(probe, num_rays);
         update_probe_depth(probe);
         probe.dirty = false;
+        probe.last_update_time = static_cast<float>(
+            std::chrono::high_resolution_clock::now().time_since_epoch().count() / 1e9
+        );
     }
     
-    void update_dirty_probes(uint32_t max_probes_per_frame = 8) {
+    void update_dirty_probes(uint32_t max_probes_per_frame = 32) {
         uint32_t updated = 0;
-        for (int64_t z = 0; z < grid_->dimensions.z && updated < max_probes_per_frame; ++z) {
-            for (int64_t y = 0; y < grid_->dimensions.y && updated < max_probes_per_frame; ++y) {
-                for (int64_t x = 0; x < grid_->dimensions.x && updated < max_probes_per_frame; ++x) {
-                    if (grid_->at(x, y, z).dirty) {
-                        update_probe(x, y, z, 128);
-                        updated++;
+        
+        std::vector<std::tuple<int64_t, int64_t, int64_t, float>> dirty_probes;
+        for (int64_t z = 0; z < grid_->dimensions.z; ++z) {
+            for (int64_t y = 0; y < grid_->dimensions.y; ++y) {
+                for (int64_t x = 0; x < grid_->dimensions.x; ++x) {
+                    IrradianceProbe& probe = grid_->at(x, y, z);
+                    if (probe.dirty) {
+                        float priority = probe.last_update_time;
+                        dirty_probes.emplace_back(x, y, z, priority);
                     }
                 }
             }
+        }
+        
+        std::sort(dirty_probes.begin(), dirty_probes.end(),
+            [](const auto& a, const auto& b) { return std::get<3>(a) < std::get<3>(b); });
+        
+        for (const auto& [x, y, z, _] : dirty_probes) {
+            if (updated >= max_probes_per_frame) break;
+            update_probe(x, y, z, 128);
+            updated++;
         }
     }
     
@@ -431,13 +447,66 @@ private:
     }
     
     float compute_visibility(const Vec3f& pos, const Vec3f& dir, float dist, const IrradianceProbe& probe) const {
-        (void)probe;
+        if (dist < 0.01f) return 1.0f;
+        
+        float raycast_dist = dist * 0.95f;
         Vec3f hit_pos;
         Vec3i64 hit_voxel;
-        if (tracer_.raycast(pos, dir, dist * 0.9f, hit_pos, hit_voxel)) {
+        if (tracer_.raycast(pos, dir, raycast_dist, hit_pos, hit_voxel)) {
             return 0.0f;
         }
+        
+        Vec3f to_probe = probe.position - pos;
+        float probe_dist = length(to_probe);
+        if (probe_dist < 0.01f) return 1.0f;
+        
+        Vec3f probe_dir = to_probe / probe_dist;
+        uint32_t depth_idx = get_octahedron_index(probe_dir, DEPTH_RESOLUTION);
+        float probe_depth = probe.depth[depth_idx];
+        
+        if (probe_depth > 0.0f && probe_depth < probe_dist * 0.9f) {
+            return 0.0f;
+        }
+        
+        float bias = 0.1f;
+        for (int i = 0; i < 3; ++i) {
+            float t = (probe_depth * 0.5f + bias * static_cast<float>(i)) / probe_dist;
+            if (t > 1.0f) break;
+            
+            Vec3f check_pos = pos + to_probe * t;
+            Vec3i64 voxel_pos(
+                static_cast<int64_t>(std::floor(check_pos.x)),
+                static_cast<int64_t>(std::floor(check_pos.y)),
+                static_cast<int64_t>(std::floor(check_pos.z))
+            );
+            
+            auto voxel = world_->get_voxel(voxel_pos);
+            if (voxel && voxel->is_solid()) {
+                return 0.0f;
+            }
+        }
+        
         return 1.0f;
+    }
+    
+    uint32_t get_octahedron_index(const Vec3f& dir, uint32_t resolution) const {
+        Vec3f d = normalize(dir);
+        float abs_sum = std::abs(d.x) + std::abs(d.y) + std::abs(d.z);
+        Vec3f p = d / abs_sum;
+        
+        if (p.z < 0.0f) {
+            float px = p.x;
+            p.x = (1.0f - std::abs(p.y)) * (px >= 0.0f ? 1.0f : -1.0f);
+            p.y = (1.0f - std::abs(px)) * (p.y >= 0.0f ? 1.0f : -1.0f);
+        }
+        
+        float fu = (p.x + 1.0f) * 0.5f;
+        float fv = (p.y + 1.0f) * 0.5f;
+        
+        int32_t u = static_cast<int32_t>(std::clamp(fu * static_cast<float>(resolution), 0.0f, static_cast<float>(resolution) - 1.0f));
+        int32_t v = static_cast<int32_t>(std::clamp(fv * static_cast<float>(resolution), 0.0f, static_cast<float>(resolution) - 1.0f));
+        
+        return static_cast<uint32_t>(v * resolution + u);
     }
     
     Vec3f compute_normal(const Vec3f& pos, const Vec3f& incoming) const {
@@ -596,7 +665,7 @@ public:
     void set_max_probes_per_frame(uint32_t max) { max_probes_per_frame_ = max; }
     
 private:
-    uint32_t max_probes_per_frame_{8};
+    uint32_t max_probes_per_frame_{32};
 };
 
 class GISystem {

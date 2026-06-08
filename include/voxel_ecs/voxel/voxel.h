@@ -11,6 +11,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <cassert>
+#include <stdexcept>
 #include <iostream>
 #include <iomanip>
 
@@ -21,6 +22,7 @@ using namespace math;
 constexpr int64_t CHUNK_SIZE = 32;
 constexpr int64_t BRICK_SIZE = 8;
 constexpr uint32_t MAX_LOD = 6;
+constexpr uint32_t MAX_RECURSION_DEPTH = 1024;
 
 struct VoxelData {
     Color albedo{1.0f, 1.0f, 1.0f};
@@ -134,6 +136,10 @@ private:
     
     void insert_recursive(uint32_t node_idx, const Vec3i64& pos, const VoxelData& voxel,
                          uint32_t depth, const Vec3i64& center, int64_t half_size) {
+        if (depth > MAX_RECURSION_DEPTH) {
+            throw std::runtime_error("SVDAG insert recursion depth exceeded");
+        }
+        
         if (depth == 0) {
             SVDAGNode& node = nodes_[node_idx];
             node.is_leaf = true;
@@ -163,6 +169,10 @@ private:
     
     std::optional<VoxelData> query_recursive(uint32_t node_idx, const Vec3i64& pos,
                                             uint32_t depth, const Vec3i64& center, int64_t half_size) const {
+        if (depth > MAX_RECURSION_DEPTH) {
+            throw std::runtime_error("SVDAG query recursion depth exceeded");
+        }
+        
         const SVDAGNode& node = nodes_[node_idx];
         
         if (node.is_leaf) {
@@ -187,6 +197,10 @@ private:
     
     void remove_recursive(uint32_t node_idx, const Vec3i64& pos,
                          uint32_t depth, const Vec3i64& center, int64_t half_size) {
+        if (depth > MAX_RECURSION_DEPTH) {
+            throw std::runtime_error("SVDAG remove recursion depth exceeded");
+        }
+        
         SVDAGNode& node = nodes_[node_idx];
         
         if (depth == 0) {
@@ -210,55 +224,136 @@ private:
     }
     
     uint64_t hash_node(uint32_t node_idx) {
-        const SVDAGNode& node = nodes_[node_idx];
-        uint64_t h = node.child_mask | (static_cast<uint64_t>(node.is_leaf) << 8);
+        std::vector<std::pair<uint32_t, bool>> stack;
+        std::unordered_map<uint32_t, uint64_t> hash_cache;
+        stack.emplace_back(node_idx, false);
         
-        if (node.is_leaf) {
-            const SVDAGData& d = data_[node.data_index];
-            h ^= std::bit_cast<uint32_t>(d.color.r) * 0x9e3779b9ULL;
-            h ^= std::bit_cast<uint32_t>(d.color.g) * 0x85ebca6bULL;
-            h ^= std::bit_cast<uint32_t>(d.color.b) * 0xc2b2ae35ULL;
-        } else {
-            for (uint8_t i = 0; i < 8; ++i) {
-                if (node.has_child(i)) {
-                    h ^= hash_node(node.children[i]) * (0x9e3779b9ULL << i);
+        while (!stack.empty()) {
+            auto [idx, visited] = stack.back();
+            stack.pop_back();
+            
+            if (visited) {
+                const SVDAGNode& node = nodes_[idx];
+                uint64_t h = node.child_mask | (static_cast<uint64_t>(node.is_leaf) << 8);
+                
+                if (node.is_leaf) {
+                    const SVDAGData& d = data_[node.data_index];
+                    h ^= std::bit_cast<uint32_t>(d.color.r) * 0x9e3779b9ULL;
+                    h ^= std::bit_cast<uint32_t>(d.color.g) * 0x85ebca6bULL;
+                    h ^= std::bit_cast<uint32_t>(d.color.b) * 0xc2b2ae35ULL;
+                } else {
+                    for (uint8_t i = 0; i < 8; ++i) {
+                        if (node.has_child(i)) {
+                            auto it = hash_cache.find(node.children[i]);
+                            if (it != hash_cache.end()) {
+                                h ^= it->second * (0x9e3779b9ULL << i);
+                            }
+                        }
+                    }
+                }
+                
+                hash_cache[idx] = h;
+            } else {
+                if (hash_cache.count(idx)) continue;
+                if (stack.size() > MAX_RECURSION_DEPTH) {
+                    throw std::runtime_error("SVDAG hash recursion depth exceeded");
+                }
+                
+                stack.emplace_back(idx, true);
+                
+                const SVDAGNode& node = nodes_[idx];
+                if (!node.is_leaf) {
+                    for (int8_t i = 7; i >= 0; --i) {
+                        if (node.has_child(i) && !hash_cache.count(node.children[i])) {
+                            stack.emplace_back(node.children[i], false);
+                        }
+                    }
                 }
             }
         }
         
-        return h;
+        return hash_cache[node_idx];
     }
     
     uint32_t compact_node(uint32_t old_idx) {
-        uint64_t h = hash_node(old_idx);
-        auto it = hash_map_.find(h);
-        if (it != hash_map_.end()) {
-            return it->second;
+        std::vector<std::tuple<uint32_t, uint32_t, bool, uint8_t>> stack;
+        std::unordered_map<uint32_t, uint32_t> old_to_new;
+        
+        uint64_t root_h = hash_node(old_idx);
+        auto root_it = hash_map_.find(root_h);
+        if (root_it != hash_map_.end()) {
+            return root_it->second;
         }
         
-        uint32_t new_idx = static_cast<uint32_t>(compacted_nodes_.size());
+        uint32_t root_new_idx = static_cast<uint32_t>(compacted_nodes_.size());
+        SVDAGNode root_old_node = nodes_[old_idx];
+        compacted_nodes_.push_back(root_old_node);
+        hash_map_[root_h] = root_new_idx;
+        old_to_new[old_idx] = root_new_idx;
         
-        SVDAGNode old_node = nodes_[old_idx];
-        SVDAGNode new_node = old_node;
+        stack.emplace_back(old_idx, root_new_idx, false, 0);
         
-        compacted_nodes_.push_back(new_node);
-        
-        hash_map_[h] = new_idx;
-        
-        if (old_node.is_leaf) {
-            new_node.data_index = static_cast<uint32_t>(compacted_data_.size());
-            compacted_data_.push_back(data_[old_node.data_index]);
-        } else {
-            for (uint8_t i = 0; i < 8; ++i) {
-                if (old_node.has_child(i)) {
-                    new_node.children[i] = compact_node(old_node.children[i]);
+        while (!stack.empty()) {
+            auto& [idx, new_idx, children_processed, child_idx] = stack.back();
+            
+            if (stack.size() > MAX_RECURSION_DEPTH) {
+                throw std::runtime_error("SVDAG compact recursion depth exceeded");
+            }
+            
+            if (!children_processed) {
+                SVDAGNode& old_node = nodes_[idx];
+                
+                if (old_node.is_leaf) {
+                    SVDAGNode& new_node = compacted_nodes_[new_idx];
+                    new_node.data_index = static_cast<uint32_t>(compacted_data_.size());
+                    compacted_data_.push_back(data_[old_node.data_index]);
+                    stack.pop_back();
+                    continue;
+                }
+                
+                std::get<2>(stack.back()) = true;
+                std::get<3>(stack.back()) = 0;
+            } else {
+                SVDAGNode& old_node = nodes_[idx];
+                SVDAGNode& new_node = compacted_nodes_[new_idx];
+                
+                uint8_t i = child_idx;
+                if (i < 8 && old_node.has_child(i)) {
+                    uint32_t child_old_idx = old_node.children[i];
+                    auto it = old_to_new.find(child_old_idx);
+                    
+                    if (it == old_to_new.end()) {
+                        uint64_t h = hash_node(child_old_idx);
+                        auto hash_it = hash_map_.find(h);
+                        if (hash_it != hash_map_.end()) {
+                            new_node.children[i] = hash_it->second;
+                            old_to_new[child_old_idx] = hash_it->second;
+                        } else {
+                            uint32_t child_new_idx = static_cast<uint32_t>(compacted_nodes_.size());
+                            SVDAGNode child_old_node = nodes_[child_old_idx];
+                            compacted_nodes_.push_back(child_old_node);
+                            hash_map_[h] = child_new_idx;
+                            old_to_new[child_old_idx] = child_new_idx;
+                            new_node.children[i] = child_new_idx;
+                            
+                            std::get<3>(stack.back()) = i + 1;
+                            stack.emplace_back(child_old_idx, child_new_idx, false, 0);
+                            continue;
+                        }
+                    } else {
+                        new_node.children[i] = it->second;
+                    }
+                }
+                
+                std::get<3>(stack.back()) = i + 1;
+                
+                if (i >= 8) {
+                    stack.pop_back();
                 }
             }
         }
         
-        compacted_nodes_[new_idx] = new_node;
-        
-        return new_idx;
+        return root_new_idx;
     }
     
     std::vector<SVDAGNode> nodes_;
